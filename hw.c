@@ -1,6 +1,8 @@
+#pragma GCC optimize ("O3")
+
 #include <string.h>
 
-
+#include "gnuboy.h"
 #include "defs.h"
 #include "cpu.h"
 #include "hw.h"
@@ -9,6 +11,7 @@
 #include "mem.h"
 #include "fastmem.h"
 
+#include "esp_attr.h"
 
 struct hw hw;
 
@@ -21,7 +24,7 @@ struct hw hw;
  * lines that transition from low to high.
  */
 
-void hw_interrupt(byte i, byte mask)
+void IRAM_ATTR hw_interrupt(byte i, byte mask)
 {
 	byte oldif = R_IF;
 	i &= 0x1F & mask;
@@ -31,7 +34,7 @@ void hw_interrupt(byte i, byte mask)
 	if ((R_IF & (R_IF ^ oldif) & R_IE) && cpu.ime) cpu.halt = 0;
 	/* if ((i & (hw.ilines ^ i) & R_IE) && cpu.ime) cpu.halt = 0; */
 	/* if ((i & R_IE) && cpu.ime) cpu.halt = 0; */
-	
+
 	hw.ilines &= ~mask;
 	hw.ilines |= i;
 }
@@ -44,7 +47,7 @@ void hw_interrupt(byte i, byte mask)
  * stall the cpu are necessary.
  */
 
-void hw_dma(byte b)
+void IRAM_ATTR hw_dma(byte b)
 {
 	int i;
 	addr a;
@@ -56,7 +59,7 @@ void hw_dma(byte b)
 
 
 
-void hw_hdma_cmd(byte c)
+void IRAM_ATTR hw_hdma_cmd(byte c)
 {
 	int cnt;
 	addr sa;
@@ -69,7 +72,7 @@ void hw_hdma_cmd(byte c)
 		R_HDMA5 = c & 0x7f;
 		return;
 	}
-	
+
 	/* Perform GDMA */
 	sa = ((addr)R_HDMA1 << 8) | (R_HDMA2&0xf0);
 	da = 0x8000 | ((int)(R_HDMA3&0x1f) << 8) | (R_HDMA4&0xf0);
@@ -87,7 +90,7 @@ void hw_hdma_cmd(byte c)
 }
 
 
-void hw_hdma()
+void IRAM_ATTR hw_hdma()
 {
 	int cnt;
 	addr sa;
@@ -113,7 +116,7 @@ void hw_hdma()
  * interrupt line) if a transition has been made.
  */
 
-void pad_refresh()
+void IRAM_ATTR pad_refresh()
 {
 	byte oldp1;
 	oldp1 = R_P1;
@@ -173,10 +176,3 @@ void hw_reset()
 	R_HDMA5 = 0xFF;
 	R_VBK = 0xFE;
 }
-
-
-
-
-
-
-

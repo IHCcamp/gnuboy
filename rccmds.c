@@ -1,13 +1,12 @@
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 
+#include "gnuboy.h"
 #include "defs.h"
 #include "rc.h"
-#include "rckeys.h"
 #include "hw.h"
-#include "emu.h"
 #include "loader.h"
-#include "split.h"
+
 
 
 /*
@@ -16,7 +15,7 @@
 
 #define CMD_PAD(b, B) \
 static int (cmd_ ## b)(int c, char **v) \
-{ pad_set((PAD_ ## B), v[0][0] == '+'); return 0; } \
+{ (void) c; /* avoid warning about unused parameter */ pad_set((PAD_ ## B), v[0][0] == '+'); return 0; } \
 static int (cmd_ ## b)(int c, char **v)
 
 CMD_PAD(up, UP);
@@ -97,6 +96,18 @@ static int cmd_loadstate(int argc, char **argv)
 	return 0;
 }
 
+#ifndef GNUBOY_NO_SCREENSHOT
+static int cmd_screenshot(int argc, char **argv)
+{
+	int i=0;
+	char *filename=NULL;
+
+	if (argc >= 2)
+		filename = argv[1];
+
+	return vid_screenshot(filename);
+}
+#endif /* GNUBOY_NO_SCREENSHOT */
 
 
 /*
@@ -105,16 +116,6 @@ static int cmd_loadstate(int argc, char **argv)
 
 rccmd_t rccmds[] =
 {
-	RCC("set", cmd_set),
-	RCC("bind", cmd_bind),
-	RCC("unbind", cmd_unbind),
-	RCC("unbindall", cmd_unbindall),
-	RCC("source", cmd_source),
-	RCC("reset", cmd_reset),
-	RCC("quit", cmd_quit),
-	RCC("savestate", cmd_savestate),
-	RCC("loadstate", cmd_loadstate),
-	
 	RCC("+up", cmd_up),
 	RCC("-up", cmd_up),
 	RCC("+down", cmd_down),
@@ -131,6 +132,20 @@ rccmd_t rccmds[] =
 	RCC("-start", cmd_start),
 	RCC("+select", cmd_select),
 	RCC("-select", cmd_select),
+	
+#ifndef GNUBOY_NO_SCREENSHOT
+	RCC("screenshot", cmd_screenshot),
+#endif /* GNUBOY_NO_SCREENSHOT */
+	
+	RCC("set", cmd_set),
+	RCC("bind", cmd_bind),
+	RCC("unbind", cmd_unbind),
+	RCC("unbindall", cmd_unbindall),
+	RCC("source", cmd_source),
+	RCC("reset", cmd_reset),
+	RCC("quit", cmd_quit),
+	RCC("savestate", cmd_savestate),
+	RCC("loadstate", cmd_loadstate),
 	
 	RCC_END
 };
@@ -169,26 +184,3 @@ int rc_command(char *line)
 	
 	return -1;
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

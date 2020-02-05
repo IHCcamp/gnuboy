@@ -1,17 +1,15 @@
+#pragma GCC optimize ("O3")
 
-
-
-
+#include "gnuboy.h"
 #include "defs.h"
 #include "regs.h"
 #include "hw.h"
+#include "lcd.h"
 #include "cpu.h"
 #include "mem.h"
 #include "fastmem.h"
 #include "cpuregs.h"
 #include "cpucore.h"
-#include "lcdc.h"
-#include "debug.h"
 
 #ifdef USE_ASM
 #include "asm.h"
@@ -24,6 +22,8 @@ struct cpu cpu;
 
 
 #define ZFLAG(n) ( (n) ? 0 : FZ )
+#define HFLAG(n) ( (n) ? 0 : FH )
+#define CFLAG(n) ( (n) ? 0 : FC )
 
 
 #define PUSH(w) ( (SP -= 2), (writew(xSP, (w))) )
@@ -241,30 +241,45 @@ label: op(b); break;
 
 
 
+
+/* A:
+	Set lcdc ahead of cpu by 19us (matches minimal hblank duration according
+	to some docs). Value from cpu.lcdc (when positive) is used to drive CPU,
+	setting some ahead-time at startup is necessary to begin emulation.
+*/
+
+
 void cpu_reset()
 {
 	cpu.speed = 0;
 	cpu.halt = 0;
 	cpu.div = 0;
 	cpu.tim = 0;
+	/* set lcdc ahead of cpu by 19us; see A */
+	/* FIXME: leave value at 0, use lcdc_trans() to actually send lcdc ahead */
 	cpu.lcdc = 40;
 
 	IME = 0;
 	IMA = 0;
-	
+
 	PC = 0x0100;
 	SP = 0xFFFE;
 	AF = 0x01B0;
 	BC = 0x0013;
 	DE = 0x00D8;
 	HL = 0x014D;
-	
+
 	if (hw.cgb) A = 0x11;
 	if (hw.gba) B = 0x01;
 }
 
-
-void div_advance(int cnt)
+/* cnt - time to emulate, expressed in 2MHz units in
+	single-speed and 4MHz units in double speed mode
+*/
+/* FIXME: employ common unit to drive whatever_advance(),
+	(double-speed machine cycles (2MHz) is a good candidate)
+	handle differences in place */
+void IRAM_ATTR div_advance(int cnt)
 {
 	cpu.div += (cnt<<1);
 	if (cpu.div >= 256)
@@ -274,10 +289,16 @@ void div_advance(int cnt)
 	}
 }
 
-void timer_advance(int cnt)
+/* cnt - time to emulate, expressed in 2MHz units in
+	single-speed and 4MHz units in double speed mode
+*/
+/* FIXME: employ common unit to drive whatever_advance(),
+	(double-speed machine cycles (2MHz) is a good candidate)
+	handle differences in place */
+void IRAM_ATTR timer_advance(int cnt)
 {
 	int unit, tima;
-	
+
 	if (!(R_TAC & 0x04)) return;
 
 	unit = ((-R_TAC) & 3) << 1;
@@ -298,18 +319,24 @@ void timer_advance(int cnt)
 	}
 }
 
-void lcdc_advance(int cnt)
+/* cnt - time to emulate, expressed in 2MHz units
+	Will call lcdc_trans() if CPU emulation catched up or
+	went ahead of LCDC, so that lcd never falls	behind
+*/
+inline void lcdc_advance(int cnt)
 {
 	cpu.lcdc -= cnt;
 	if (cpu.lcdc <= 0) lcdc_trans();
 }
 
-void sound_advance(int cnt)
+/* cnt - time to emulate, expressed in 2MHz units */
+inline void sound_advance(int cnt)
 {
 	cpu.snd += cnt;
 }
 
-void cpu_timers(int cnt)
+/* cnt - time to emulate, expressed in 2MHz units */
+void IRAM_ATTR cpu_timers(int cnt)
 {
 	div_advance(cnt << cpu.speed);
 	timer_advance(cnt << cpu.speed);
@@ -317,9 +344,17 @@ void cpu_timers(int cnt)
 	sound_advance(cnt);
 }
 
-int cpu_idle(int max)
+/* cpu_idle()
+	Skip idle phase of CPU operation, if any
+
+	max - maximum time to skip expressed in 2MHz units
+	returns number of cycles skipped
+*/
+/* FIXME: bring cpu_timers() out, make caller advance system */
+int IRAM_ATTR cpu_idle(int max)
 {
 	int cnt, unit;
+
 
 	if (!(cpu.halt && IME)) return 0;
 	if (R_IF & R_IE)
@@ -331,7 +366,7 @@ int cpu_idle(int max)
 	/* Make sure we don't miss lcdc status events! */
 	if ((R_IE & (IF_VBLANK | IF_STAT)) && (max > cpu.lcdc))
 		max = cpu.lcdc;
-	
+
 	/* If timer interrupt cannot happen, this is very simple! */
 	if (!((R_IE & IF_TIMER) && (R_TAC & 0x04)))
 	{
@@ -346,7 +381,7 @@ int cpu_idle(int max)
 
 	if (max < cnt)
 		cnt = max;
-	
+
 	cpu_timers(cnt);
 	return cnt;
 }
@@ -355,7 +390,16 @@ int cpu_idle(int max)
 
 extern int debug_trace;
 
-int cpu_emulate(int cycles)
+/* cpu_emulate()
+	Emulate CPU for time no less than specified
+
+	cycles - time to emulate, expressed in 2MHz units
+	returns number of cycles emulated
+
+	Might emulate up to cycles+(11) time units (longest op takes 12
+	cycles in single-speed mode)
+*/
+int IRAM_ATTR cpu_emulate(int cycles)
 {
 	int i;
 	byte op, cbop;
@@ -366,6 +410,7 @@ int cpu_emulate(int cycles)
 
 	i = cycles;
 next:
+	/* Skip idle cycles */
 	if ((clen = cpu_idle(i)))
 	{
 		i -= clen;
@@ -373,6 +418,7 @@ next:
 		return cycles-i;
 	}
 
+	/* Handle interrupts */
 	if (IME && (IF & IE))
 	{
 		PRE_INT;
@@ -395,7 +441,7 @@ next:
 		}
 	}
 	IME = IMA;
-	
+
 	if (debug_trace) debug_disassemble(PC, 1);
 	op = FETCH;
 	clen = cycles_table[op];
@@ -411,7 +457,7 @@ next:
 	case 0x6D: /* LD L,L */
 	case 0x7F: /* LD A,A */
 		break;
-			
+
 	case 0x41: /* LD B,C */
 		B = C; break;
 	case 0x42: /* LD B,D */
@@ -486,7 +532,7 @@ next:
 		H = readb(xHL); break;
 	case 0x67: /* LD H,A */
 		H = A; break;
-			
+
 	case 0x68: /* LD L,B */
 		L = B; break;
 	case 0x69: /* LD L,C */
@@ -501,7 +547,7 @@ next:
 		L = readb(xHL); break;
 	case 0x6F: /* LD L,A */
 		L = A; break;
-			
+
 	case 0x70: /* LD (HL),B */
 		b = B; goto __LD_HL;
 	case 0x71: /* LD (HL),C */
@@ -519,7 +565,7 @@ next:
 	__LD_HL:
 		writeb(xHL,b);
 		break;
-			
+
 	case 0x78: /* LD A,B */
 		A = B; break;
 	case 0x79: /* LD A,C */
@@ -592,10 +638,28 @@ next:
 		A = readhi(FETCH); break;
 	case 0xF2: /* LDH A,(C) (undocumented) */
 		A = readhi(C); break;
-			
+
 
 	case 0xF8: /* LD HL,SP+imm */
+#if 0
 		b = FETCH; LDHLSP(b); break;
+#else
+		{
+			// https://gammpei.github.io/blog/posts/2018-03-04/how-to-write-a-game-boy-emulator-part-8-blarggs-cpu-test-roms-1-3-4-5-7-8-9-10-11.html
+			signed char v = (signed char) FETCH;
+			int temp = (int)(SP) + (int)v;
+
+			byte half_carry = ((SP & 0xff) ^ v ^ temp) & 0x10;
+
+			F &= ~(FZ | FN | FH | FC);
+
+			if (half_carry) F |= FH;
+			if ((SP & 0xff) + (byte)v > 0xff) F |= FC;
+
+			HL = temp & 0xffff;
+		}
+		break;
+#endif
 	case 0xF9: /* LD SP,HL */
 		SP = HL; break;
 	case 0xFA: /* LD A,(imm) */
@@ -641,7 +705,7 @@ next:
 		break;
 	case 0x3C: /* INC A */
 		INC(A); break;
-			
+
 	case 0x03: /* INC BC */
 		INCW(BC); break;
 	case 0x13: /* INC DE */
@@ -650,7 +714,7 @@ next:
 		INCW(HL); break;
 	case 0x33: /* INC SP */
 		INCW(SP); break;
-			
+
 	case 0x05: /* DEC B */
 		DEC(B); break;
 	case 0x0D: /* DEC C */
@@ -690,7 +754,38 @@ next:
 		RRA(A); break;
 
 	case 0x27: /* DAA */
-		DAA; break;
+#if 0
+		DAA
+#else
+		{
+			//http://forums.nesdev.com/viewtopic.php?t=9088
+
+			int a = A;
+			if (!(F & FN))
+			{
+				if ((F & FH) || ((a & 0x0f) > 9)) a += 0x06;
+
+				if ((F & FC) || (a > 0x9f)) a += 0x60;
+			}
+			else
+			{
+				if (F & FH)	a = (a - 6) & 0xff;
+
+				if (F & FC) a -= 0x60;
+			}
+
+			F &= ~(FH | FZ);
+
+			if (a & 0x100) F |= FC;
+
+			a &= 0xff;
+
+			if (!a) F |= FZ;
+
+			A = (byte)a;
+		}
+#endif
+		break;
 	case 0x2F: /* CPL */
 		CPL(A); break;
 
@@ -764,7 +859,7 @@ next:
 		b = 0x38;
 	__RST:
 		RST(b); break;
-			
+
 	case 0xC1: /* POP BC */
 		POP(BC); break;
 	case 0xC5: /* PUSH BC */
@@ -778,12 +873,30 @@ next:
 	case 0xE5: /* PUSH HL */
 		PUSH(HL); break;
 	case 0xF1: /* POP AF */
-		POP(AF); break;
+		POP(AF); AF &= 0xfff0; break;
 	case 0xF5: /* PUSH AF */
 		PUSH(AF); break;
 
 	case 0xE8: /* ADD SP,imm */
+#if 0
 		b = FETCH; ADDSP(b); break;
+#else
+		{
+			// https://gammpei.github.io/blog/posts/2018-03-04/how-to-write-a-game-boy-emulator-part-8-blarggs-cpu-test-roms-1-3-4-5-7-8-9-10-11.html
+			signed char v = (signed char) FETCH;
+			int temp = (int)(SP) + (int)v;
+
+			byte half_carry = ((SP & 0xff) ^ v ^ temp) & 0x10;
+
+			F &= ~(FZ | FN | FH | FC);
+
+			if (half_carry) F |= FH;
+			if ((SP & 0xff) + (byte)v > 0xff) F |= FC;
+
+			SP = temp & 0xffff;
+		}
+		break;
+#endif
 
 	case 0xF3: /* DI */
 		DI; break;
@@ -805,7 +918,7 @@ next:
 		}
 		/* NOTE - we do not implement dmg STOP whatsoever */
 		break;
-			
+
 	case 0x76: /* HALT */
 		cpu.halt = 1;
 		break;
@@ -833,7 +946,7 @@ next:
 			break;
 		}
 		break;
-			
+
 	default:
 		die(
 			"invalid opcode 0x%02X at address 0x%04X, rombank = %d\n",
@@ -841,6 +954,8 @@ next:
 		break;
 	}
 
+	/* Advance time counters */
+	/* FIXME: make use of cpu_timers() */
 	clen <<= 1;
 	div_advance(clen);
 	timer_advance(clen);
@@ -857,8 +972,8 @@ next:
 
 
 #ifndef ASM_CPU_STEP
-
-int cpu_step(int max)
+/* Outdated equivalent of emu.c:emu_step() probably? Doesn't seem to be used. */
+int IRAM_ATTR cpu_step(int max)
 {
 	int cnt;
 	if ((cnt = cpu_idle(max))) return cnt;
@@ -866,15 +981,3 @@ int cpu_step(int max)
 }
 
 #endif /* ASM_CPU_STEP */
-
-
-
-
-
-
-
-
-
-
-
-

@@ -1,20 +1,101 @@
-
+#pragma GCC optimize ("O3")
 
 #include <stdlib.h>
 
+#include "gnuboy.h"
 #include "defs.h"
 #include "hw.h"
 #include "regs.h"
 #include "mem.h"
 #include "rtc.h"
 #include "lcd.h"
-#include "lcdc.h"
 #include "sound.h"
+
+#include "esp_partition.h"
+#include "esp_attr.h"
+
+#include "../odroid/odroid_display.h"
+#include "../odroid/odroid_audio.h"
+
 
 struct mbc mbc;
 struct rom rom;
 struct ram ram;
 
+extern FILE* RomFile;
+extern uint8_t BankCache[512 / 8];
+
+static inline byte* GetRomPtr(short bank)
+{
+	// GBC pages are 16k.
+	const size_t BANK_SIZE = 0x4000;
+	byte* const PSRAM = (byte*)0x3f800000;
+	const size_t OFFSET = bank * BANK_SIZE;
+
+	if (RomFile)
+	{
+		short slot = bank >> 3;
+		uint8_t bit = 1 << (bank & 0x7);
+
+		if (!(BankCache[slot] & bit))
+		{
+			//printf("GetRomPtr: Loading bank=%d, slot=%d, bit=%d.\n", bank, slot, bit);
+
+			// Stop the SPI bus
+			odroid_display_lock();
+
+			//odroid_display_drain_spi();
+
+			// Load the 16K page
+			if (fseek(RomFile, OFFSET, SEEK_SET))
+			{
+				printf("GetRomPtr: fseek failed. OFFSET=%d\n", OFFSET);
+
+				odroid_audio_terminate();
+
+				odroid_display_show_sderr(ODROID_SD_ERR_BADFILE);
+				abort();
+			}
+
+	#if 0
+			const size_t BLOCK_SIZE = 512;
+			for (size_t offset = 0; offset < BANK_SIZE; offset += BLOCK_SIZE)
+			{
+				size_t count = fread((uint8_t*)PSRAM + (bank * BANK_SIZE) + offset, 1, BLOCK_SIZE, RomFile);
+				__asm__("nop");
+				__asm__("nop");
+				__asm__("nop");
+				__asm__("nop");
+				__asm__("memw");
+
+				if (count < BLOCK_SIZE) break;
+			}
+	#else
+			size_t count = fread((uint8_t*)PSRAM + OFFSET, 1, BANK_SIZE, RomFile);
+			if (count < BANK_SIZE)
+			{
+				printf("GetRomPtr: fread failed. bank=%d, count=%d\n", bank, count);
+
+				odroid_audio_terminate();
+
+				odroid_display_show_sderr(ODROID_SD_ERR_BADFILE);
+				abort();
+			}
+	#endif
+
+			BankCache[slot] |= bit;
+
+			//printf("%s: bank=%d, result=%p\n", __func__, bank, (void*)PSRAM + OFFSET);
+
+			odroid_display_unlock();
+		}
+	}
+
+	byte* result = PSRAM + OFFSET;
+	//printf("%s: bank=%d, result=%p\n", __func__, bank, result);
+
+	return result;
+}
 
 /*
  * In order to make reads and writes efficient, we keep tables
@@ -28,16 +109,23 @@ struct ram ram;
  * make the old maps potentially invalid.
  */
 
-void mem_updatemap()
+void IRAM_ATTR mem_updatemap()
 {
 	int n;
 	byte **map;
-	
+
+	mbc.rombank &= (mbc.romsize - 1);
+
+	rom.bank[mbc.rombank] = GetRomPtr(mbc.rombank);
+
+	mbc.rambank &= (mbc.ramsize - 1);
+
 	map = mbc.rmap;
 	map[0x0] = rom.bank[0];
 	map[0x1] = rom.bank[0];
 	map[0x2] = rom.bank[0];
 	map[0x3] = rom.bank[0];
+
 	if (mbc.rombank < mbc.romsize)
 	{
 		map[0x4] = rom.bank[mbc.rombank] - 0x4000;
@@ -45,44 +133,67 @@ void mem_updatemap()
 		map[0x6] = rom.bank[mbc.rombank] - 0x4000;
 		map[0x7] = rom.bank[mbc.rombank] - 0x4000;
 	}
-	else map[0x4] = map[0x5] = map[0x6] = map[0x7] = NULL;
-	if (0 && (R_STAT & 0x03) == 0x03)
-	{
-		map[0x8] = NULL;
-		map[0x9] = NULL;
-	}
 	else
 	{
-		map[0x8] = lcd.vbank[R_VBK & 1] - 0x8000;
-		map[0x9] = lcd.vbank[R_VBK & 1] - 0x8000;
+		map[0x4] = map[0x5] = map[0x6] = map[0x7] = NULL;
 	}
-	if (mbc.enableram && !(rtc.sel&8))
-	{
-		map[0xA] = ram.sbank[mbc.rambank] - 0xA000;
-		map[0xB] = ram.sbank[mbc.rambank] - 0xA000;
-	}
-	else map[0xA] = map[0xB] = NULL;
+
+	//if (0 && (R_STAT & 0x03) == 0x03)
+	//{
+		map[0x8] = NULL;
+		map[0x9] = NULL;
+	//}
+	//else
+	//{
+		// map[0x8] = lcd.vbank[R_VBK & 1] - 0x8000;
+		// map[0x9] = lcd.vbank[R_VBK & 1] - 0x8000;
+	//}
+
+	// if (mbc.enableram && !(rtc.sel&8))
+	// {
+	//  	map[0xA] = ram.sbank[mbc.rambank] - 0xA000;
+	//  	map[0xB] = ram.sbank[mbc.rambank] - 0xA000;
+	// }
+	//  else
+	// {
+		map[0xA] = map[0xB] = NULL;
+	//}
+
+#if 1
 	map[0xC] = ram.ibank[0] - 0xC000;
 	n = R_SVBK & 0x07;
 	map[0xD] = ram.ibank[n?n:1] - 0xD000;
 	map[0xE] = ram.ibank[0] - 0xE000;
 	map[0xF] = NULL;
-	
+#else
+	map[0xC] = NULL;
+	map[0xD] = NULL;
+	map[0xE] = NULL;
+	map[0xF] = NULL;
+#endif
+
+#if 0
 	map = mbc.wmap;
 	map[0x0] = map[0x1] = map[0x2] = map[0x3] = NULL;
 	map[0x4] = map[0x5] = map[0x6] = map[0x7] = NULL;
 	map[0x8] = map[0x9] = NULL;
-	if (mbc.enableram && !(rtc.sel&8))
-	{
-		map[0xA] = ram.sbank[mbc.rambank] - 0xA000;
-		map[0xB] = ram.sbank[mbc.rambank] - 0xA000;
-	}
-	else map[0xA] = map[0xB] = NULL;
+
+	// if (mbc.enableram && !(rtc.sel&8))
+	// {
+	// 	map[0xA] = ram.sbank[mbc.rambank] - 0xA000;
+	// 	map[0xB] = ram.sbank[mbc.rambank] - 0xA000;
+	// }
+	// else
+	// {
+	// 	map[0xA] = map[0xB] = NULL;
+	// }
+
 	map[0xC] = ram.ibank[0] - 0xC000;
 	n = R_SVBK & 0x07;
 	map[0xD] = ram.ibank[n?n:1] - 0xD000;
 	map[0xE] = ram.ibank[0] - 0xE000;
 	map[0xF] = NULL;
+#endif
 }
 
 
@@ -92,7 +203,7 @@ void mem_updatemap()
  * byte value to be written.
  */
 
-void ioreg_write(byte r, byte b)
+void IRAM_ATTR ioreg_write(byte r, byte b)
 {
 	if (!hw.cgb)
 	{
@@ -113,7 +224,7 @@ void ioreg_write(byte r, byte b)
 			return;
 		}
 	}
-	
+
 	switch(r)
 	{
 	case RI_TIMA:
@@ -158,6 +269,9 @@ void ioreg_write(byte r, byte b)
 			hw_interrupt(0, IF_SERIAL);
 		}
 		R_SC = b; /* & 0x7f; */
+		break;
+	case RI_SB:
+		REG(r) = b;
 		break;
 	case RI_DIV:
 		REG(r) = 0;
@@ -208,13 +322,13 @@ void ioreg_write(byte r, byte b)
 		REG(r) = b;
 		break;
 	case RI_HDMA2:
-		REG(r) = b & 0xF0;
+		REG(r) = b; //& 0xF0;
 		break;
 	case RI_HDMA3:
-		REG(r) = b & 0x1F;
+		REG(r) = b; //& 0x1F;
 		break;
 	case RI_HDMA4:
-		REG(r) = b & 0xF0;
+		REG(r) = b; //& 0xF0;
 		break;
 	case RI_HDMA5:
 		hw_hdma_cmd(b);
@@ -238,7 +352,7 @@ void ioreg_write(byte r, byte b)
 }
 
 
-byte ioreg_read(byte r)
+byte IRAM_ATTR ioreg_read(byte r)
 {
 	switch(r)
 	{
@@ -295,7 +409,7 @@ byte ioreg_read(byte r)
  * and a byte value written to the address.
  */
 
-void mbc_write(int a, byte b)
+void IRAM_ATTR mbc_write(int a, byte b)
 {
 	byte ha = (a>>12);
 
@@ -325,6 +439,7 @@ void mbc_write(int a, byte b)
 			break;
 		}
 		break;
+
 	case MBC_MBC2: /* is this at all right? */
 		if ((a & 0x0100) == 0x0000)
 		{
@@ -337,6 +452,7 @@ void mbc_write(int a, byte b)
 			break;
 		}
 		break;
+
 	case MBC_MBC3:
 		switch (ha & 0xE)
 		{
@@ -356,6 +472,7 @@ void mbc_write(int a, byte b)
 			break;
 		}
 		break;
+
 	case MBC_RUMBLE:
 		switch (ha & 0xF)
 		{
@@ -375,18 +492,23 @@ void mbc_write(int a, byte b)
 			mbc.enableram = ((b & 0x0F) == 0x0A);
 			break;
 		case 0x2:
-			if ((b & 0xFF) == 0) b = 0x01;
-			mbc.rombank = (mbc.rombank & 0x100) | (b & 0xFF);
+			//if ((b & 0xFF) == 0) b = 0x01;
+			mbc.rombank = (mbc.rombank & 0x100) | (b);
 			break;
 		case 0x3:
-			mbc.rombank = (mbc.rombank & 0xFF) | ((int)(b&1)<<8);
+			mbc.rombank = (mbc.rombank & 0x0FF) | ((int)(b&1)<<8);
 			break;
 		case 0x4:
 		case 0x5:
 			mbc.rambank = b & 0x0f;
+			//printf("MBC5: Mapped rambank=%d\n", mbc.rambank);
+			break;
+		default:
+			printf("MBC_MBC5: invalid write to 0x%x (0x%x)\n", a, b);
 			break;
 		}
 		break;
+
 	case MBC_HUC1: /* FIXME - this is all guesswork -- is it right??? */
 		switch (ha & 0xE)
 		{
@@ -410,6 +532,7 @@ void mbc_write(int a, byte b)
 			break;
 		}
 		break;
+
 	case MBC_HUC3:
 		switch (ha & 0xE)
 		{
@@ -430,8 +553,7 @@ void mbc_write(int a, byte b)
 		}
 		break;
 	}
-	mbc.rombank &= (mbc.romsize - 1);
-	mbc.rambank &= (mbc.ramsize - 1);
+
 	/* printf("%02X\n", mbc.rombank); */
 	mem_updatemap();
 }
@@ -443,11 +565,11 @@ void mbc_write(int a, byte b)
  * region, it accepts writes to any address.
  */
 
-void mem_write(int a, byte b)
+void IRAM_ATTR mem_write(int a, byte b)
 {
 	int n;
 	byte ha = (a>>12) & 0xE;
-	
+
 	/* printf("write to 0x%04X: 0x%02X\n", a, b); */
 	switch (ha)
 	{
@@ -468,7 +590,22 @@ void mem_write(int a, byte b)
 			rtc_write(b);
 			break;
 		}
+
+		__asm__("nop");
+		__asm__("nop");
+		__asm__("nop");
+		__asm__("nop");
+		__asm__("memw");
 		ram.sbank[mbc.rambank][a & 0x1FFF] = b;
+		__asm__("nop");
+		__asm__("nop");
+		__asm__("nop");
+		__asm__("nop");
+		__asm__("memw");
+
+		ram.sram_dirty = 1;
+		//printf("mem_write: bank=%d, sram %p=0x%d\n", mbc.rambank, (void*)(a & 0x1fff), b);
+		//printf("mem_write: check - write=0x%x, read=0x%x\n", b, ram.sbank[mbc.rambank][a & 0x1FFF]);
 		break;
 	case 0xC:
 		if ((a & 0xF000) == 0xC000)
@@ -513,17 +650,22 @@ void mem_write(int a, byte b)
  * region.
  */
 
-byte mem_read(int a)
+byte IRAM_ATTR mem_read(int a)
 {
 	int n;
 	byte ha = (a>>12) & 0xE;
-	
-	/* printf("read %04x\n", a); */
+	int index;
+	byte* bnk;
+	int tmp;
+
+	//printf("read ha=0x%04x, a=0x%04x\n", ha, a);
+
 	switch (ha)
 	{
 	case 0x0:
 	case 0x2:
-		return rom.bank[0][a];
+		//if (a >= 16384) return 0xff;
+		return rom.bank[0][a & 0x3fff];
 	case 0x4:
 	case 0x6:
 		return rom.bank[mbc.rombank][a & 0x3FFF];
@@ -537,6 +679,13 @@ byte mem_read(int a)
 			return 0xFF;
 		if (rtc.sel&8)
 			return rtc.regs[rtc.sel&7];
+
+		__asm__("nop");
+		__asm__("nop");
+		__asm__("nop");
+		__asm__("nop");
+		__asm__("memw");
+		//printf("mem_read: bank=%d, sram %p=0x%d\n", mbc.rambank, (void*)(a & 0x1fff), ram.sbank[mbc.rambank][a & 0x1FFF]);
 		return ram.sbank[mbc.rambank][a & 0x1FFF];
 	case 0xC:
 		if ((a & 0xF000) == 0xC000)
@@ -569,10 +718,3 @@ void mbc_reset()
 	mbc.enableram = 0;
 	mem_updatemap();
 }
-
-
-
-
-
-
-

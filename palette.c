@@ -1,8 +1,10 @@
+#if 0
 #include <stdlib.h>
 
+#include "gnuboy.h"
 #include "defs.h"
 #include "fb.h"
-#include "sys.h"
+
 
 static byte palmap[32768];
 static byte pallock[256];
@@ -129,7 +131,7 @@ void pal_expire()
 void pal_set332()
 {
 	int i, r, g, b;
-	
+
 	fb.indexed = 0;
 	fb.cc[0].r = 5;
 	fb.cc[1].r = 5;
@@ -137,14 +139,10 @@ void pal_set332()
 	fb.cc[0].l = 0;
 	fb.cc[1].l = 3;
 	fb.cc[2].l = 6;
-	
+
 	i = 0;
 	for (b = 0; b < 4; b++) for (g = 0; g < 8; g++) for (r = 0; r < 8; r++)
 		vid_setpal(i++, (r<<5)|(r<<2)|(r>>1),
 			   (g<<5)|(g<<2)|(g>>1), (b<<6)|(b<<4)|(b<<2)|b);
 }
-
-
-
-
-
+#endif

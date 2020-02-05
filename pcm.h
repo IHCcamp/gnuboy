@@ -4,12 +4,13 @@
 
 
 #include "defs.h"
+#include <stdint.h>
 
 struct pcm
 {
 	int hz, len;
 	int stereo;
-	byte *buf;
+	int16_t* buf;
 	int pos;
 };
 
@@ -17,5 +18,3 @@ extern struct pcm pcm;
 
 
 #endif
-
-

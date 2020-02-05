@@ -1,4 +1,3 @@
-
 #ifndef __MEM_H__
 #define __MEM_H__
 
@@ -31,8 +30,9 @@ struct mbc
 
 struct rom
 {
-	byte (*bank)[16384];
+	byte* bank[512];
 	char name[20];
+	int length;
 };
 
 struct ram
@@ -40,7 +40,8 @@ struct ram
 	byte hi[256];
 	byte ibank[8][4096];
 	byte (*sbank)[8192];
-	int loaded;
+	byte loaded;
+	byte sram_dirty;
 };
 
 
@@ -49,16 +50,12 @@ extern struct rom rom;
 extern struct ram ram;
 
 
-
-
-
 void mem_updatemap();
 void ioreg_write(byte r, byte b);
 void mbc_write(int a, byte b);
 void mem_write(int a, byte b);
 byte mem_read(int a);
 void mbc_reset();
-
 
 
 #define READB(a) ( mbc.rmap[(a)>>12] \
@@ -72,9 +69,4 @@ void mbc_reset();
 #define WRITEW(a, w) ( WRITEB((a), (w)&0xFF), WRITEB((a)+1, (w)>>8) )
 
 
-
-
 #endif
-
-
-

@@ -1,5 +1,3 @@
-
-
 #ifndef __CPU_H__
 #define __CPU_H__
 
@@ -28,14 +26,13 @@ struct cpu
 
 extern struct cpu cpu;
 
+
+void cpu_timers(int cnt);
 void cpu_reset();
+int cpu_emulate(int cycles); /* NOTE there may be an ASM version of that */
+
 void div_advance(int cnt);
 void timer_advance(int cnt);
-void lcdc_advance(int cnt);
 void sound_advance(int cnt);
-void cpu_timers(int cnt);
-int cpu_emulate(int cycles);
 
 #endif
-
-

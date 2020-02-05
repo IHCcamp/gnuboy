@@ -1,17 +1,16 @@
-
-
 #include <stdlib.h>
 #include <stdio.h>
 
+#include "gnuboy.h"
 #include "defs.h"
 #include "cpu.h"
 #include "mem.h"
-#include "fastmem.h"
 #include "regs.h"
 #include "rc.h"
 
 #include "cpuregs.h"
-
+#ifndef GNUBOY_DISABLE_DEBUG_DISASSEMBLE
+#include "fastmem.h"
 
 static char *mnemonic_table[256] =
 {
@@ -553,6 +552,7 @@ static byte operand_count[256] =
 	2, 1, 1, 1, 1, 1, 2, 1, 2, 1, 3, 1, 1, 1, 2, 1
 };
 
+#endif /* GNUBOY_DISABLE_DEBUG_DISASSEMBLE */
 
 /* replace with a real interactive debugger eventually... */
 
@@ -566,6 +566,10 @@ rcvar_t debug_exports[] =
 
 void debug_disassemble(addr a, int c)
 {
+#ifdef GNUBOY_DISABLE_DEBUG_DISASSEMBLE
+	(void) a; /* avoid warning about unused parameter */
+	(void) c; /* avoid warning about unused parameter */
+#else /* i.e. ifndef GNUBOY_DISABLE_DEBUG_DISASSEMBLE */
 	static int i, j, k;
 	static byte code;
 	static byte ops[3];
@@ -660,30 +664,6 @@ void debug_disassemble(addr a, int c)
 		fflush(stdout);
 		c--;
 	}
+#endif /* GNUBOY_DISABLE_DEBUG_DISASSEMBLE */
 }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 

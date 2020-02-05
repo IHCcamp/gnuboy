@@ -1,3 +1,4 @@
+#if 0
 /*
  * keytable.c
  *
@@ -6,9 +7,10 @@
 
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 #include <strings.h>
+#include <ctype.h>
 
+#include "gnuboy.h"
 #include "input.h"
 
 /* keytable - Mapping of key names to codes, and back. A single code
@@ -46,7 +48,7 @@ keytable_t keytable[] =
 	{ "capslock", K_CAPS },    /* dup */
 	{ "numlock", K_NUMLOCK },
 	{ "scroll", K_SCROLL },
-	
+
 	{ "minus", K_MINUS },
 	{ "_", K_MINUS },          /* dup */
 	{ "equals", K_EQUALS },
@@ -65,7 +67,7 @@ keytable_t keytable[] =
 	{ "semi", K_SEMI },
 	{ "semicolon", K_SEMI },   /* dup */
 	{ "quote", K_QUOTE },
-	
+
 	{ "f1", K_F1 },
 	{ "f2", K_F2 },
 	{ "f3", K_F3 },
@@ -78,7 +80,7 @@ keytable_t keytable[] =
 	{ "f10", K_F10 },
 	{ "f11", K_F11 },
 	{ "f12", K_F12 },
-	
+
 	{ "num0", K_NUM0 },
 	{ "num1", K_NUM1 },
 	{ "num2", K_NUM2 },
@@ -107,7 +109,7 @@ keytable_t keytable[] =
 	{ "joyright", K_JOYRIGHT },
 	{ "joyup", K_JOYUP },
 	{ "joydown", K_JOYDOWN },
-	
+
 	{ "joy0", K_JOY0 },
 	{ "joy1", K_JOY1 },
 	{ "joy2", K_JOY2 },
@@ -125,43 +127,29 @@ keytable_t keytable[] =
 	{ "joy14", K_JOY14 },
 	{ "joy15", K_JOY15 },
 
-	{ "xocheck", K_NUM1 },
-	{ "xodown", K_NUM2 },
-	{ "xocross", K_NUM3 },
-	{ "xoleft", K_NUM4 },
-	{ "xoright", K_NUM6 },
-	{ "xobox", K_NUM7 },
-	{ "xoup", K_NUM8 },
-	{ "xocircle", K_NUM9 },
-
 	{ NULL, 0 }
 };
 
 int k_keycode(char *name)
 {
 	keytable_t *key;
-	
+
 	for (key = keytable; key->name; key++)
 		if (!strcasecmp(key->name, name))
 			return key->code;
 	if (strlen(name) == 1)
-		return tolower(name[0]);
+		return tolower((unsigned char)name[0]);
 	return 0;
 }
 
 char *k_keyname(int code)
 {
 	keytable_t *key;
-	
+
 	for (key = keytable; key->name; key++)
 		if (key->code == code)
 			return key->name;
 	return NULL;
 }
 
-
-
-
-
-
-
+#endif

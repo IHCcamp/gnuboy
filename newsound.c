@@ -1,3 +1,4 @@
+#if 0
 /*
  * new sound core for 1.1.x
  */
@@ -33,25 +34,18 @@ static struct sev *sevs;
 
 void sound_mix(int cycles)
 {
-	
+
 }
 
 
 void sound_update(int force)
 {
 	int now = 0;
-	
+
 	for (;;)
 	{
 		if (sevs->time > cpu.snd) break;
-		
+
 	}
 }
-
-
-
-
-
-
-
-
+#endif

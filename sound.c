@@ -1,6 +1,8 @@
+#pragma GCC optimize ("O3")
+
 #include <string.h>
 
-
+#include "gnuboy.h"
 #include "defs.h"
 #include "pcm.h"
 #include "sound.h"
@@ -9,9 +11,11 @@
 #include "regs.h"
 #include "rc.h"
 #include "noise.h"
-#include "sys.h"
 
-const static byte dmgwave[16] =
+#include <esp_attr.h>
+#include "freertos/FreeRTOS.h"
+
+static const byte DRAM_ATTR dmgwave[16] =
 {
 	0xac, 0xdd, 0xda, 0x48,
 	0x36, 0x02, 0xcf, 0x16,
@@ -19,7 +23,7 @@ const static byte dmgwave[16] =
 	0xac, 0xdd, 0xda, 0x48
 };
 
-const static byte cgbwave[16] =
+static const byte DRAM_ATTR cgbwave[16] =
 {
 	0x00, 0xff, 0x00, 0xff,
 	0x00, 0xff, 0x00, 0xff,
@@ -27,7 +31,7 @@ const static byte cgbwave[16] =
 	0x00, 0xff, 0x00, 0xff,
 };
 
-const static byte sqwave[4][8] =
+static const byte DRAM_ATTR sqwave[4][8] =
 {
 	{  0, 0,-1, 0, 0, 0, 0, 0 },
 	{  0,-1,-1, 0, 0, 0, 0, 0 },
@@ -35,7 +39,7 @@ const static byte sqwave[4][8] =
 	{ -1, 0, 0,-1,-1,-1,-1,-1 }
 };
 
-const static int freqtab[8] =
+static const int DRAM_ATTR freqtab[8] =
 {
 	(1<<14)*2,
 	(1<<14),
@@ -62,32 +66,32 @@ rcvar_t sound_exports[] =
 };
 
 
-static void s1_freq_d(int d)
+inline static void s1_freq_d(int d)
 {
 	if (RATE > (d<<4)) S1.freq = 0;
 	else S1.freq = (RATE << 17)/d;
 }
 
-static void s1_freq()
+inline static void s1_freq()
 {
 	s1_freq_d(2048 - (((R_NR14&7)<<8) + R_NR13));
 }
 
-static void s2_freq()
+inline static void s2_freq()
 {
 	int d = 2048 - (((R_NR24&7)<<8) + R_NR23);
 	if (RATE > (d<<4)) S2.freq = 0;
 	else S2.freq = (RATE << 17)/d;
 }
 
-static void s3_freq()
+inline static void s3_freq()
 {
 	int d = 2048 - (((R_NR34&7)<<8) + R_NR33);
 	if (RATE > (d<<3)) S3.freq = 0;
 	else S3.freq = (RATE << 21)/d;
 }
 
-static void s4_freq()
+inline static void s4_freq()
 {
 	S4.freq = (freqtab[R_NR43&7] >> (R_NR43 >> 4)) * RATE;
 	if (S4.freq >> 18) S4.freq = 1<<18;
@@ -134,29 +138,30 @@ void sound_off()
 	R_NR30 = 0x7F;
 	R_NR31 = 0xFF;
 	R_NR32 = 0x9F;
-	R_NR33 = 0xBF;
+	R_NR34 = 0xBF;
 	R_NR41 = 0xFF;
 	R_NR42 = 0x00;
 	R_NR43 = 0x00;
 	R_NR44 = 0xBF;
 	R_NR50 = 0x77;
 	R_NR51 = 0xF3;
-	R_NR52 = 0xF1;
+	R_NR52 = 0x70;
 	sound_dirty();
 }
 
 void sound_reset()
 {
 	memset(&snd, 0, sizeof snd);
-	if (pcm.hz) snd.rate = (1<<21) / pcm.hz;
+	if (pcm.hz) snd.rate = (1<<21) / pcm.hz;//(1<<21) / pcm.hz;
 	else snd.rate = 0;
 	memcpy(WAVE, hw.cgb ? cgbwave : dmgwave, 16);
 	memcpy(ram.hi+0x30, WAVE, 16);
 	sound_off();
+	R_NR52 = 0xF1;
 }
 
 
-void sound_mix()
+void IRAM_ATTR sound_mix()
 {
 	int s, l, r, f, n;
 
@@ -200,7 +205,7 @@ void sound_mix()
 			if (R_NR51 & 1) r += s;
 			if (R_NR51 & 16) l += s;
 		}
-		
+
 		if (S2.on)
 		{
 			s = sqwave[R_NR21>>6][(S2.pos>>18)&7] & S2.envol;
@@ -218,7 +223,7 @@ void sound_mix()
 			if (R_NR51 & 2) r += s;
 			if (R_NR51 & 32) l += s;
 		}
-		
+
 		if (S3.on)
 		{
 			s = WAVE[(S3.pos>>22) & 15];
@@ -255,27 +260,34 @@ void sound_mix()
 			if (R_NR51 & 8) r += s;
 			if (R_NR51 & 128) l += s;
 		}
-		
+
 		l *= (R_NR50 & 0x07);
 		r *= ((R_NR50 & 0x70)>>4);
-		l >>= 4;
-		r >>= 4;
-		
-		if (l > 127) l = 127;
-		else if (l < -128) l = -128;
-		if (r > 127) r = 127;
-		else if (r < -128) r = -128;
+		// l >>= 4;
+		// r >>= 4;
+
+		l <<= 4;
+		r <<= 4;
+
+		// if (l > 127) l = 127;
+		// else if (l < -128) l = -128;
+		// if (r > 127) r = 127;
+		// else if (r < -128) r = -128;
 
 		if (pcm.buf)
 		{
 			if (pcm.pos >= pcm.len)
-				pcm_submit();
-			if (pcm.stereo)
 			{
-				pcm.buf[pcm.pos++] = l+128;
-				pcm.buf[pcm.pos++] = r+128;
+				//pcm_submit();
+				printf("sound_mix: buffer overflow. (pcm.len=%d)\n", pcm.len);
+				//abort();
 			}
-			else pcm.buf[pcm.pos++] = ((l+r)>>1)+128;
+			else if (pcm.stereo)
+			{
+				pcm.buf[pcm.pos++] = (int16_t)l; //+128;
+				pcm.buf[pcm.pos++] = (int16_t)r; //+128;
+			}
+			else pcm.buf[pcm.pos++] = (int16_t)((l+r)>>1); //+128;
 		}
 	}
 	R_NR52 = (R_NR52&0xf0) | S1.on | (S2.on<<1) | (S3.on<<2) | (S4.on<<3);
@@ -339,14 +351,14 @@ void s4_init()
 }
 
 
-void sound_write(byte r, byte b)
+void IRAM_ATTR sound_write(byte r, byte b)
 {
 #if 0
 	static void *timer;
 	if (!timer) timer = sys_timer();
 	printf("write %02X: %02X @ %d\n", r, b, sys_elapsed(timer));
 #endif
-	
+
 	if (!(R_NR52 & 128) && r != RI_NR52) return;
 	if ((r & 0xF0) == 0x30)
 	{
@@ -457,7 +469,3 @@ void sound_write(byte r, byte b)
 		return;
 	}
 }
-
-
-
-

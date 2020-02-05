@@ -1,20 +1,27 @@
-#undef _GNU_SOURCE
-#define _GNU_SOURCE
-#include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
-
+#include <string.h>
 #include <stdarg.h>
 #include <signal.h>
 
+#include "gnuboy.h"
 #include "input.h"
 #include "rc.h"
-#include "sys.h"
-#include "rckeys.h"
-#include "emu.h"
-#include "exports.h"
 #include "loader.h"
 
+
+void die(char *fmt, ...)
+{
+	va_list ap;
+
+	va_start(ap, fmt);
+	vfprintf(stderr, fmt, ap);
+	va_end(ap);
+	abort();
+}
+
+
+#if 0
 #include "Version"
 
 
@@ -186,7 +193,7 @@ static void catch_signals()
 static char *base(char *s)
 {
 	char *p;
-	p = strrchr(s, '/');
+	p = strrchr(s, DIRSEP_CHAR);
 	if (p) return p+1;
 	return s;
 }
@@ -217,7 +224,7 @@ int main(int argc, char *argv[])
 		else if (argv[i][0] == '-' && argv[i][1]);
 		else rom = argv[i];
 	}
-	
+
 	if (!rom) usage(base(argv[0]));
 
 	/* If we have special perms, drop them ASAP! */
@@ -279,10 +286,10 @@ int main(int argc, char *argv[])
 			else arg = "1";
 			while ((s = strchr(opt, '-'))) *s = '_';
 			while ((s = strchr(arg, ','))) *s = ' ';
-			
+
 			cmd = malloc(strlen(opt) + strlen(arg) + 6);
 			sprintf(cmd, "set %s %s", opt, arg);
-			
+
 			rc_command(cmd);
 			free(cmd);
 			free(opt);
@@ -299,23 +306,13 @@ int main(int argc, char *argv[])
 
 	rom = strdup(rom);
 	sys_sanitize(rom);
-	
+
 	loader_init(rom);
-	
+
 	emu_reset();
 	emu_run();
 
 	/* never reached */
 	return 0;
 }
-
-
-
-
-
-
-
-
-
-
-
+#endif

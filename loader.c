@@ -1,26 +1,46 @@
-#undef _POSIX_C_SOURCE
-#define _POSIX_C_SOURCE 200809L
-#undef _GNU_SOURCE
-#define _GNU_SOURCE
-#include <string.h>
-
 #include <stdio.h>
 #include <stdlib.h>
-#include <ctype.h>
+#include <string.h>
 #include <time.h>
+#include <ctype.h>
 
+#include "esp_partition.h"
+#include "esp_system.h"
+#include "esp_heap_caps.h"
+
+#ifndef GNUBOY_NO_MINIZIP
+/*
+** use http://www.winimage.com/zLibDll/minizip.html v1.1
+** which needs zlib
+*/
+#include <unzip/unzip.h>
+#endif /* GNUBOY_USE_MINIZIP */
+
+
+#include "gnuboy.h"
 #include "defs.h"
 #include "regs.h"
 #include "mem.h"
 #include "hw.h"
+#include "lcd.h"
 #include "rtc.h"
 #include "rc.h"
-#include "lcd.h"
-#include "inflate.h"
-#include "xz/xz.h"
-#include "save.h"
 #include "sound.h"
-#include "sys.h"
+
+#include "../odroid/odroid_settings.h"
+#include "../odroid/odroid_sdcard.h"
+#include "../odroid/odroid_display.h"
+
+
+void* FlashAddress = 0;
+FILE* RomFile = NULL;
+uint8_t BankCache[512 / 8];
+
+
+#ifndef GNUBOY_NO_MINIZIP
+static int check_zip(char *filename);
+static byte *loadzipfile(char *archive, int *filesize);
+#endif /* GNUBOY_USE_MINIZIP */
 
 static int mbc_table[256] =
 {
@@ -82,38 +102,37 @@ static int ramsize_table[256] =
 };
 
 
-static char *romfile;
-static char *sramfile;
-static char *rtcfile;
-static char *saveprefix;
+static char *romfile=NULL;
+static char *sramfile=NULL;
+static char *rtcfile=NULL;
+static char *saveprefix=NULL;
 
-static char *savename;
-static char *savedir;
+static char *savename=NULL;
+static char *savedir=NULL;
 
-static int saveslot;
+static int saveslot=0;
 
-static int forcebatt, nobatt;
-static int forcedmg, gbamode;
+static int forcebatt=0, nobatt=0;
+static int forcedmg=0, gbamode=0;
 
-static int memfill = -1, memrand = -1;
+static int memfill = 0, memrand = -1;
+
+extern const char* SD_BASE_PATH;
 
 
 static void initmem(void *mem, int size)
 {
 	char *p = mem;
-	if (memrand >= 0)
-	{
-		srand(memrand ? memrand : time(0));
-		while(size--) *(p++) = rand();
-	}
-	else if (memfill >= 0)
-		memset(p, memfill, size);
+	memset(p, 0xff /*memfill*/, size);
 }
 
 static byte *loadfile(FILE *f, int *len)
 {
-	int c, l = 0, p = 0;
-	byte *d = 0, buf[512];
+	int l = 0, c = 0;
+	byte *d = NULL;
+#ifdef GNUBOY_ENABLE_ORIGINAL_SLOW_INCREMENTAL_LOADER
+	int p = 0;
+	byte buf[512];
 
 	for(;;)
 	{
@@ -125,6 +144,22 @@ static byte *loadfile(FILE *f, int *len)
 		memcpy(d+p, buf, c);
 		p += c;
 	}
+#else /* fast and no space check */
+	/* alloc and read once - NOTE no sanity check on filesize */
+	fseek(f, 0, SEEK_END);
+	l = ftell(f);
+	fseek(f, 0, SEEK_SET);
+	d = (byte*) malloc(l);
+	if (d != NULL)
+	{
+		c = fread((void *) d, (size_t) l, 1, f);
+		if (c != 1)
+		{
+			l = 0;
+			/* NOTE if this fails caller doesn't catch it (ditto the slow and "safe" version) */
+		}
+	}
+#endif /* GNUBOY_ENABLE_ORIGINAL_SLOW_INCREMENTAL_LOADER */
 	*len = l;
 	return d;
 }
@@ -143,8 +178,11 @@ static void inflate_callback(byte b)
 	inf_buf[inf_pos++] = b;
 }
 
-static byte *gunzip(byte *data, int *len) {
+static byte *decompress(byte *data, int *len)
+{
 	long pos = 0;
+	if (data[0] != 0x1f || data[1] != 0x8b)
+		return data;
 	inf_buf = 0;
 	inf_pos = inf_len = 0;
 	if (unzip(data, &pos, inflate_callback) < 0)
@@ -153,109 +191,179 @@ static byte *gunzip(byte *data, int *len) {
 	return inf_buf;
 }
 
-static void write_dec(byte *data, int len) {
-	int i;
-	for(i=0; i < len; i++)
-		inflate_callback(data[i]);
-}
-
-static int unxz(byte *data, int len) {
-	struct xz_buf b;
-	struct xz_dec *s;
-	enum xz_ret ret;
-	unsigned char out[4096];
-
-	/*
-	 * Support up to 64 MiB dictionary. The actually needed memory
-	 * is allocated once the headers have been parsed.
-	*/
-	s = xz_dec_init(XZ_DYNALLOC, 1 << 26);
-	if(!s) goto err;
-
-	b.in = data;
-	b.in_pos = 0;
-	b.in_size = len;
-	b.out = out;
-	b.out_pos = 0;
-	b.out_size = sizeof(out);
-
-	while (1) {
-		ret = xz_dec_run(s, &b);
-		if(b.out_pos == sizeof(out)) {
-			write_dec(out, sizeof(out));
-			b.out_pos = 0;
-		}
-
-		if(ret == XZ_OK) continue;
-
-		write_dec(out, b.out_pos);
-
-		if(ret == XZ_STREAM_END) {
-			xz_dec_end(s);
-			return 0;
-		}
-		goto err;
-	}
-
-	err:
-	xz_dec_end(s);
-	return -1;
-}
-
-static byte *do_unxz(byte *data, int *len) {
-	xz_crc32_init();
-	xz_crc64_init();
-	inf_buf = 0;
-	inf_pos = inf_len = 0;
-	if (unxz(data, *len) < 0)
-		return data;
-	*len = inf_pos;
-	return inf_buf;
-}
-
-static byte *decompress(byte *data, int *len)
-{
-	if (data[0] == 0x1f && data[1] == 0x8b)
-		return gunzip(data, len);
-	if(data[0] == 0xFD && !memcmp(data+1, "7zXZ", 4))
-		return do_unxz(data, len);
-	return data;
-}
-
 
 int rom_load()
 {
-	FILE *f;
 	byte c, *data, *header;
 	int len = 0, rlen;
 
-	if (strcmp(romfile, "-")) f = fopen(romfile, "rb");
-	else f = stdin;
-	if (!f) die("cannot open rom file: %s\n", romfile);
+	data = (void*)0x3f800000;
 
-	data = loadfile(f, &len);
-	header = data = decompress(data, &len);
-	
+	char* romPath = odroid_settings_RomFilePath_get();
+	if (!romPath)
+	{
+		printf("loader: Reading from flash.\n");
+
+		// copy from flash
+		spi_flash_mmap_handle_t hrom;
+
+		const esp_partition_t* part = esp_partition_find_first(0x40, 0, NULL);
+		if (part == 0)
+		{
+			printf("esp_partition_find_first failed.\n");
+			abort();
+		}
+
+		void* flashAddress;
+		for (size_t offset = 0; offset < 0x400000; offset += 0x100000)
+		{
+			esp_err_t err = esp_partition_read(part, offset, (void *)(data + offset), 0x100000);
+			if (err != ESP_OK)
+			{
+				printf("esp_partition_read failed. size = %x, offset = %x (%d)\n", part->size, offset, err);
+				abort();
+			}
+		}
+	}
+	else
+	{
+		printf("loader: Reading from sdcard.\n");
+
+		// copy from SD card
+		esp_err_t r = odroid_sdcard_open(SD_BASE_PATH);
+		if (r != ESP_OK)
+		{
+			odroid_display_show_sderr(ODROID_SD_ERR_NOCARD);
+			abort();
+		}
+
+		// load the first 16k
+		RomFile = fopen(romPath, "rb");
+		if (RomFile == NULL)
+		{
+			printf("loader: fopen failed.\n");
+                        odroid_display_show_sderr(ODROID_SD_ERR_BADFILE);
+			abort();
+		}
+
+		// copy
+#if 0
+		const size_t BLOCK_SIZE = 512;
+		for (size_t offset = 0; offset < 0x4000; offset += BLOCK_SIZE)
+		{
+			size_t count = fread((uint8_t*)data + offset, 1, BLOCK_SIZE, RomFile);
+			__asm__("nop");
+			__asm__("nop");
+			__asm__("nop");
+			__asm__("nop");
+			__asm__("memw");
+
+			if (count < BLOCK_SIZE) break;
+		}
+#else
+		size_t count = fread((uint8_t*)data, 1, 0x4000, RomFile);
+		if (count < 0x4000)
+		{
+                        odroid_display_show_sderr(ODROID_SD_ERR_BADFILE);
+			printf("loader: fread failed.\n");
+			abort();
+		}
+#endif
+
+		BankCache[0] = 1;
+	}
+
+
+	printf("Initialized. ROM@%p\n", data);
+	header = data;
+
 	memcpy(rom.name, header+0x0134, 16);
-	if (rom.name[14] & 0x80) rom.name[14] = 0;
-	if (rom.name[15] & 0x80) rom.name[15] = 0;
+	//if (rom.name[14] & 0x80) rom.name[14] = 0;
+	//if (rom.name[15] & 0x80) rom.name[15] = 0;
 	rom.name[16] = 0;
+	printf("loader: rom.name='%s'\n", rom.name);
 
-	c = header[0x0147];
+	int tmp = *((int*)(header + 0x0144));
+	c = (tmp >> 24) & 0xff;
 	mbc.type = mbc_table[c];
 	mbc.batt = (batt_table[c] && !nobatt) || forcebatt;
 	rtc.batt = rtc_table[c];
-	mbc.romsize = romsize_table[header[0x0148]];
-	mbc.ramsize = ramsize_table[header[0x0149]];
+
+	tmp = *((int*)(header + 0x0148));
+	mbc.romsize = romsize_table[(tmp & 0xff)];
+	mbc.ramsize = ramsize_table[((tmp >> 8) & 0xff)];
 
 	if (!mbc.romsize) die("unknown ROM size %02X\n", header[0x0148]);
 	if (!mbc.ramsize) die("unknown SRAM size %02X\n", header[0x0149]);
 
+	const char* mbcName;
+	switch (mbc.type)
+	{
+		case MBC_NONE:
+			mbcName = "MBC_NONE";
+			break;
+
+		case MBC_MBC1:
+			mbcName = "MBC_MBC1";
+			break;
+
+		case MBC_MBC2:
+			mbcName = "MBC_MBC2";
+			break;
+
+		case MBC_MBC3:
+			mbcName = "MBC_MBC3";
+			break;
+
+		case MBC_MBC5:
+			mbcName = "MBC_MBC5";
+			break;
+
+		case MBC_RUMBLE:
+			mbcName = "MBC_RUMBLE";
+			break;
+
+		case MBC_HUC1:
+			mbcName = "MBC_HUC1";
+			break;
+
+		case MBC_HUC3:
+			mbcName = "MBC_HUC3";
+			break;
+
+		default:
+			mbcName = "(unknown)";
+			break;
+	}
+
 	rlen = 16384 * mbc.romsize;
-	rom.bank = realloc(data, rlen);
-	if (rlen > len) memset(rom.bank[0]+len, 0xff, rlen - len);
-	
-	ram.sbank = malloc(8192 * mbc.ramsize);
+	int sram_length = 8192 * mbc.ramsize;
+	printf("loader: mbc.type=%s, mbc.romsize=%d (%dK), mbc.ramsize=%d (%dK)\n", mbcName, mbc.romsize, rlen / 1024, mbc.ramsize, sram_length / 1024);
+
+	// ROM
+	rom.bank[0] = data;
+	rom.length = rlen;
+
+	// SRAM
+	ram.sram_dirty = 1;
+	ram.sbank = malloc(sram_length);
+	if (!ram.sbank)
+	{
+		// not enough free RAM,
+		// check if PSRAM has free space
+		if (rlen <= (0x100000 * 3) &&
+			sram_length <= 0x100000)
+		{
+			ram.sbank = data + (0x100000 * 3);
+			printf("SRAM using PSRAM.\n");
+		}
+		else
+		{
+			printf("No free spece for SRAM.\n");
+			abort();
+		}
+	}
+
 
 	initmem(ram.sbank, 8192 * mbc.ramsize);
 	initmem(ram.ibank, 4096 * 8);
@@ -263,46 +371,86 @@ int rom_load()
 	mbc.rombank = 1;
 	mbc.rambank = 0;
 
-	c = header[0x0143];
+	tmp = *((int*)(header + 0x0140));
+	c = tmp >> 24;
 	hw.cgb = ((c == 0x80) || (c == 0xc0)) && !forcedmg;
 	hw.gba = (hw.cgb && gbamode);
-
-	if (strcmp(romfile, "-")) fclose(f);
 
 	return 0;
 }
 
 int sram_load()
 {
-	FILE *f;
-
-	if (!mbc.batt || !sramfile || !*sramfile) return -1;
+	if (!mbc.batt) return -1;
 
 	/* Consider sram loaded at this point, even if file doesn't exist */
 	ram.loaded = 1;
 
-	f = fopen(sramfile, "rb");
-	if (!f) return -1;
-	fread(ram.sbank, 8192, mbc.ramsize, f);
-	fclose(f);
-	
+
+	const esp_partition_t* part;
+	spi_flash_mmap_handle_t hrom;
+	esp_err_t err;
+
+	part=esp_partition_find_first(0x40, 2, NULL);
+	if (part==0)
+	{
+		printf("esp_partition_find_first (save) failed.\n");
+		//abort();
+	}
+	else
+	{
+		err = esp_partition_read(part, 0, ram.sbank, mbc.ramsize * 8192);
+		if (err != ESP_OK)
+		{
+			printf("esp_partition_read failed. (%d)\n", err);
+		}
+		else
+		{
+			printf("sram_load: sram load OK.\n");
+			ram.sram_dirty = 0;
+		}
+	}
+
 	return 0;
 }
 
 
 int sram_save()
 {
-	FILE *f;
-
 	/* If we crash before we ever loaded sram, DO NOT SAVE! */
-	if (!mbc.batt || !sramfile || !ram.loaded || !mbc.ramsize)
+	if (!mbc.batt || !ram.loaded || !mbc.ramsize)
 		return -1;
-	
-	f = fopen(sramfile, "wb");
-	if (!f) return -1;
-	fwrite(ram.sbank, 8192, mbc.ramsize, f);
-	fclose(f);
-	
+
+	const esp_partition_t* part;
+	spi_flash_mmap_handle_t hrom;
+	esp_err_t err;
+
+	part=esp_partition_find_first(0x40, 2, NULL);
+	if (part==0)
+	{
+		printf("esp_partition_find_first (save) failed.\n");
+		//abort();
+	}
+	else
+	{
+		err = esp_partition_erase_range(part, 0, mbc.ramsize * 8192);
+		if (err!=ESP_OK)
+		{
+			printf("esp_partition_erase_range failed. (%d)\n", err);
+			abort();
+		}
+
+		err = esp_partition_write(part, 0, ram.sbank, mbc.ramsize * 8192);
+		if (err != ESP_OK)
+		{
+			printf("esp_partition_write failed. (%d)\n", err);
+		}
+		else
+		{
+				printf("sram_load: sram save OK.\n");
+		}
+	}
+
 	return 0;
 }
 
@@ -359,16 +507,18 @@ void rtc_save()
 
 void rtc_load()
 {
-	FILE *f;
+	//FILE *f;
 	if (!rtc.batt) return;
-	if (!(f = fopen(rtcfile, "r"))) return;
-	rtc_load_internal(f);
-	fclose(f);
+	//if (!(f = fopen(rtcfile, "r"))) return;
+	//rtc_load_internal(f);
+	//fclose(f);
 }
 
 
 void loader_unload()
 {
+	// TODO: unmap flash
+
 	sram_save();
 	if (romfile) free(romfile);
 	if (sramfile) free(sramfile);
@@ -376,15 +526,16 @@ void loader_unload()
 	if (rom.bank) free(rom.bank);
 	if (ram.sbank) free(ram.sbank);
 	romfile = sramfile = saveprefix = 0;
-	rom.bank = 0;
+	rom.bank[0] = 0;
 	ram.sbank = 0;
 	mbc.type = mbc.romsize = mbc.ramsize = mbc.batt = 0;
 }
 
+/* basename/dirname like function */
 static char *base(char *s)
 {
 	char *p;
-	p = strrchr(s, '/');
+	p = (char *) strrchr((unsigned char)s, DIRSEP_CHAR);
 	if (p) return p+1;
 	return s;
 }
@@ -394,7 +545,7 @@ static char *ldup(char *s)
 	int i;
 	char *n, *p;
 	p = n = malloc(strlen(s));
-	for (i = 0; s[i]; i++) if (isalnum(s[i])) *(p++) = tolower(s[i]);
+	for (i = 0; s[i]; i++) if (isalnum((unsigned char)s[i])) *(p++) = tolower((unsigned char)s[i]);
 	*p = 0;
 	return n;
 }
@@ -410,40 +561,10 @@ void loader_init(char *s)
 {
 	char *name, *p;
 
-	sys_checkdir(savedir, 1); /* needs to be writable */
-
-	romfile = s;
 	rom_load();
-	vid_settitle(rom.name);
-	if (savename && *savename)
-	{
-		if (savename[0] == '-' && savename[1] == 0)
-			name = ldup(rom.name);
-		else name = strdup(savename);
-	}
-	else if (romfile && *base(romfile) && strcmp(romfile, "-"))
-	{
-		name = strdup(base(romfile));
-		p = strchr(name, '.');
-		if (p) *p = 0;
-	}
-	else name = ldup(rom.name);
-	
-	saveprefix = malloc(strlen(savedir) + strlen(name) + 2);
-	sprintf(saveprefix, "%s/%s", savedir, name);
-
-	sramfile = malloc(strlen(saveprefix) + 5);
-	strcpy(sramfile, saveprefix);
-	strcat(sramfile, ".sav");
-
-	rtcfile = malloc(strlen(saveprefix) + 5);
-	strcpy(rtcfile, saveprefix);
-	strcat(rtcfile, ".rtc");
-	
-	sram_load();
 	rtc_load();
 
-	atexit(cleanup);
+	//atexit(cleanup);
 }
 
 rcvar_t loader_exports[] =
@@ -460,11 +581,109 @@ rcvar_t loader_exports[] =
 	RCV_END
 };
 
+#ifndef GNUBOY_NO_MINIZIP
+/*
+** Simplistic zip support, only loads the first file in a zip file
+** with no check as to the type (or filename/extension).
+*/
 
+/*
+**  returns 1 if a filename is a zip file
+*/
+static int check_zip(char *filename)
+{
+    char buf[2];
+    FILE *fd = NULL;
+    fd = fopen(filename, "rb");
+    if(!fd) return (0);
+    fread(buf, 2, 1, fd);
+    fclose(fd);
+    if(memcmp(buf, "PK", 2) == 0) return (1);
+    return (0);
+}
 
+static byte *loadzipfile(char *archive, int *filesize)
+{
+    char name[256];
+    unsigned char *buffer=NULL;
+    int zerror = UNZ_OK;
+    unzFile zhandle;
+    unz_file_info zinfo;
+    char tmp_header[0x200];
+    unsigned char rom_found=0;
 
+    zhandle = unzOpen(archive);
+    if(!zhandle) return (NULL);
 
+#ifdef IS_LITTLE_ENDIAN
+#define GAMEBOY_HEADER_MAGIC 0x6666EDCE
+#else /* BIG ENDIAN */
+#define GAMEBOY_HEADER_MAGIC 0xCEED6666
+#endif /* IS_LITTLE_ENDIAN */
 
+    /* Find first gameboy rom, do not use file extension, look for magic bytes/fingerprint */
+    /* Seek to first file in archive */
+    zerror = unzGoToFirstFile(zhandle);
+    if(zerror != UNZ_OK)
+    {
+        unzClose(zhandle);
+        return (NULL);
+    }
 
+    do
+    {
+        unzOpenCurrentFile(zhandle);
+        unzReadCurrentFile(zhandle, tmp_header, sizeof(tmp_header));
+        unzCloseCurrentFile(zhandle);
+        if ((*((unsigned long *)(tmp_header + 0x104))) == GAMEBOY_HEADER_MAGIC)
+        {
+            /* Gameboy Rom found! */
+            rom_found++;
+            break;
+        }
+    } while (unzGoToNextFile(zhandle) != UNZ_END_OF_LIST_OF_FILE);
 
+    if (rom_found == 0)
+        return (NULL);
 
+    /* Get information about the file */
+    unzGetCurrentFileInfo(zhandle, &zinfo, &name[0], 0xff, NULL, 0, NULL, 0);
+    *filesize = zinfo.uncompressed_size;
+
+    /* Error: file size is zero */
+    if(*filesize <= 0)
+    {
+        unzClose(zhandle);
+        return (NULL);
+    }
+
+    /* Open current file */
+    zerror = unzOpenCurrentFile(zhandle);
+    if(zerror != UNZ_OK)
+    {
+        unzClose(zhandle);
+        return (NULL);
+    }
+
+    /* Allocate buffer and read in file */
+    buffer = malloc(*filesize);
+    if(!buffer) return (NULL);
+    zerror = unzReadCurrentFile(zhandle, buffer, *filesize);
+
+    /* Internal error: free buffer and close file */
+    if(zerror < 0 || zerror != *filesize)
+    {
+        free(buffer);
+        buffer = NULL;
+        unzCloseCurrentFile(zhandle);
+        unzClose(zhandle);
+        return (NULL);
+    }
+
+    /* Close current file and archive file */
+    unzCloseCurrentFile(zhandle);
+    unzClose(zhandle);
+
+    return (buffer);
+}
+#endif /* GNUBOY_USE_MINIZIP */

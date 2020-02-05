@@ -52,5 +52,3 @@
 
 
 #endif /* __CPUREGS_H__ */
-
-

@@ -1,3 +1,4 @@
+#if 0
 /*
  * events.c
  *
@@ -50,11 +51,4 @@ int ev_getevent(event_t *ev)
 	}
 	return 1;
 }
-
-
-
-
-
-
-
-
+#endif
