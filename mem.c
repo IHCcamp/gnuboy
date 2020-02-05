@@ -14,9 +14,10 @@
 #include "esp_partition.h"
 #include "esp_attr.h"
 
+#ifdef HAVE_ODROID
 #include "../odroid/odroid_display.h"
 #include "../odroid/odroid_audio.h"
-
+#endif
 
 struct mbc mbc;
 struct rom rom;
@@ -42,7 +43,10 @@ static inline byte* GetRomPtr(short bank)
 			//printf("GetRomPtr: Loading bank=%d, slot=%d, bit=%d.\n", bank, slot, bit);
 
 			// Stop the SPI bus
+                        //
+                        #ifdef HAVE_ODROID
 			odroid_display_lock();
+                        #endif
 
 			//odroid_display_drain_spi();
 
@@ -51,9 +55,12 @@ static inline byte* GetRomPtr(short bank)
 			{
 				printf("GetRomPtr: fseek failed. OFFSET=%d\n", OFFSET);
 
+
+                                #ifdef HAVE_ODROID
 				odroid_audio_terminate();
 
 				odroid_display_show_sderr(ODROID_SD_ERR_BADFILE);
+                                #endif
 				abort();
 			}
 
@@ -76,9 +83,11 @@ static inline byte* GetRomPtr(short bank)
 			{
 				printf("GetRomPtr: fread failed. bank=%d, count=%d\n", bank, count);
 
+                                #ifdef HAVE_ODROID
 				odroid_audio_terminate();
 
 				odroid_display_show_sderr(ODROID_SD_ERR_BADFILE);
+                                #endif
 				abort();
 			}
 	#endif
@@ -87,7 +96,10 @@ static inline byte* GetRomPtr(short bank)
 
 			//printf("%s: bank=%d, result=%p\n", __func__, bank, (void*)PSRAM + OFFSET);
 
+
+                        #ifdef HAVE_ODROID
 			odroid_display_unlock();
+                        #endif
 		}
 	}
 

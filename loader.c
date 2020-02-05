@@ -27,10 +27,11 @@
 #include "rc.h"
 #include "sound.h"
 
+#ifdef HAVE_ODROID
 #include "../odroid/odroid_settings.h"
 #include "../odroid/odroid_sdcard.h"
 #include "../odroid/odroid_display.h"
-
+#endif
 
 void* FlashAddress = 0;
 FILE* RomFile = NULL;
@@ -199,7 +200,10 @@ int rom_load()
 
 	data = (void*)0x3f800000;
 
-	char* romPath = odroid_settings_RomFilePath_get();
+	char* romPath = NULL;
+        #ifdef HAVE_ODROID
+        odroid_settings_RomFilePath_get();
+        #endif
 	if (!romPath)
 	{
 		printf("loader: Reading from flash.\n");
@@ -229,6 +233,7 @@ int rom_load()
 	{
 		printf("loader: Reading from sdcard.\n");
 
+                #ifdef HAVE_ODROID
 		// copy from SD card
 		esp_err_t r = odroid_sdcard_open(SD_BASE_PATH);
 		if (r != ESP_OK)
@@ -245,6 +250,7 @@ int rom_load()
                         odroid_display_show_sderr(ODROID_SD_ERR_BADFILE);
 			abort();
 		}
+                #endif
 
 		// copy
 #if 0
@@ -264,7 +270,9 @@ int rom_load()
 		size_t count = fread((uint8_t*)data, 1, 0x4000, RomFile);
 		if (count < 0x4000)
 		{
+                        #ifdef HAVE_ODROID
                         odroid_display_show_sderr(ODROID_SD_ERR_BADFILE);
+                        #endif
 			printf("loader: fread failed.\n");
 			abort();
 		}
