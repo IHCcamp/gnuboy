@@ -192,13 +192,14 @@ static byte *decompress(byte *data, int *len)
 	return inf_buf;
 }
 
+extern byte *PSRAM;
 
 int rom_load()
 {
 	byte c, *data, *header;
 	int len = 0, rlen;
 
-	data = (void*)0x3f800000;
+	data = (void*) PSRAM;
 
 	char* romPath = NULL;
         #ifdef HAVE_ODROID
@@ -206,6 +207,7 @@ int rom_load()
         #endif
 	if (!romPath)
 	{
+#ifdef HAVE_ODROID
 		printf("loader: Reading from flash.\n");
 
 		// copy from flash
@@ -228,6 +230,7 @@ int rom_load()
 				abort();
 			}
 		}
+#endif
 	}
 	else
 	{

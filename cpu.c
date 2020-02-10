@@ -399,7 +399,7 @@ extern int debug_trace;
 	Might emulate up to cycles+(11) time units (longest op takes 12
 	cycles in single-speed mode)
 */
-int IRAM_ATTR cpu_emulate(int cycles)
+int cpu_emulate(int cycles)
 {
 	int i;
 	byte op, cbop;

@@ -26,11 +26,12 @@ struct ram ram;
 extern FILE* RomFile;
 extern uint8_t BankCache[512 / 8];
 
+extern byte *PSRAM;
+
 static inline byte* GetRomPtr(short bank)
 {
 	// GBC pages are 16k.
 	const size_t BANK_SIZE = 0x4000;
-	byte* const PSRAM = (byte*)0x3f800000;
 	const size_t OFFSET = bank * BANK_SIZE;
 
 	if (RomFile)
